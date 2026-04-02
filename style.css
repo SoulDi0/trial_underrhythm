@@ -10,7 +10,8 @@
       position: relative; z-index: 10;
       display: flex; align-items: center; justify-content: center;
       width: 100vw;
-      overflow: hidden;
+      overflow-x: clip;
+      overflow-y: visible;
     }
     .carousel-track {
       position: relative;
@@ -24,7 +25,7 @@
       width: 460px;
       min-height: 780px;
       border-radius: 36px;
-      /* overflow:visible чтобы album-wrapper мог выходить за бока */
+      
       overflow: visible;
       padding: 0 36px 28px;
       display: flex; flex-direction: column; align-items: center;
@@ -168,8 +169,8 @@
     }
     .mode-btn:hover  { transform:scale(1.15); }
     .mode-btn:active { transform:scale(0.88); }
-    /* KEY: stroke transition on SVG enables smooth color animation during card movement */
-    .mode-btn svg { width:20px; height:20px; transition: stroke 0.45s ease; }
+    /* KEY: no stroke transition — colors must switch instantly with the card */
+    .mode-btn svg { width:20px; height:20px; }
     .left-modes {
       display:flex; align-items:center; gap:30px;
       position: absolute; left: 0; transform: translateX(-12px);
@@ -245,8 +246,20 @@
       user-select: text; -webkit-user-select: text;
     }
     .menu-search input::placeholder { color: rgba(255,255,255,0.25); }
-    .menu-panel { display: none; flex-direction: column; gap: 4px; margin-top: 12px; overflow-y: auto; flex: 1; min-height: 0; }
+    .menu-panel { display: none; flex-direction: column; gap: 4px; margin-top: 12px; overflow-y: scroll; flex: 1; min-height: 0; scrollbar-width: none; }
     .menu-panel.visible { display: flex; }
+    .menu-panel::-webkit-scrollbar { display: none; }
+    /* Кастомный скроллбар — абсолютно внутри .side-menu */
+    .custom-scrollbar-thumb {
+      position: absolute; right: 5px; width: 5px; border-radius: 99px;
+      background: rgba(255,255,255,0.12);
+      transition: background 0.3s ease;
+      pointer-events: auto; cursor: pointer; z-index: 200;
+      display: none;
+    }
+    .custom-scrollbar-thumb.active {
+      background: rgba(255,255,255,0.32);
+    }
     .menu-track-item {
       display: flex; align-items: center; gap: 12px;
       padding: 8px 10px; border-radius: 10px; cursor: pointer;
