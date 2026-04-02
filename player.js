@@ -48,10 +48,10 @@ const mainCreditLabels = playerCard.querySelectorAll('.credit-label');
 // ── Состояние ────────────────────────────────────────────────────────────────
 let currentIndex = 0, isPlaying = false, isDragging = false;
 let liked = new Set(), isShuffle = false, isRepeat = false;
-// Шафл: история прослушанных и очередь следующих
-var _history = [];      // треки которые слушали (старый -> новый)
-var _shuffleQueue = []; // очередь: 2 предвычисленных рандомных трека вперёд
-var _forwardAfterBack = -1;   // сохранённый трек справа при движении назад
+var _history = [];      // история прослушанных (старый -> новый), макс 10
+var _future  = [];      // очередь вперёд при движении назад, макс 3
+var _shuffleQueue = []; // предвычисленные рандомные треки вперёд в шафле
+var _forwardAfterBack = -1;
 
 // Кэш последних индексов боковых карточек — не перерисовываем без нужды
 let _prevIdx = -1, _nextIdx = -1;
@@ -123,7 +123,7 @@ function applyTheme(t){
   playerCard.style.setProperty('--card-popup-thumb',  t.popupThumb);
   volIcon.style.stroke = t.skipColor;
   updateVolumeFill();
-  updateModeButtons(t);
+  if (!carouselBusy) updateModeButtons(t);
 }
 
 function updateModeButtons(t){
@@ -218,73 +218,110 @@ playBtn.addEventListener('click', function(){
 var _navQueue=[];
 function processNavQueue(){ if (!carouselBusy&&_navQueue.length) _navQueue.shift()(); }
 
+function randExcluding(exclude){
+  // Рандомный индекс исключающий все треки из массива exclude
+  var n = TRACKS.length;
+  if (n <= exclude.length) return Math.floor(Math.random()*n); // защита
+  var idx;
+  do { idx = Math.floor(Math.random()*n); } while (exclude.indexOf(idx) !== -1);
+  return idx;
+}
+
+function pickNextShuffle(){
+  var n = TRACKS.length;
+  while (_shuffleQueue.length < 2){
+    // Исключаем currentIndex, последний из истории и всё что уже в очереди
+    var exclude = [currentIndex].concat(_shuffleQueue);
+    if (_history.length > 0) exclude.push(_history[_history.length-1]);
+    _shuffleQueue.push(randExcluding(exclude));
+  }
+}
+
+function getNextIdx(){
+  var n = TRACKS.length;
+  if (isShuffle){
+    if (_shuffleQueue.length > 0) return _shuffleQueue[0];
+    var exclude = [currentIndex];
+    if (_history.length > 0) exclude.push(_history[_history.length-1]);
+    return randExcluding(exclude);
+  }
+  return (currentIndex + 1) % n;
+}
+
+function consumeNext(){
+  var n = TRACKS.length;
+  if (isShuffle){
+    if (_shuffleQueue.length > 0) return _shuffleQueue.shift();
+    var exclude = [currentIndex];
+    if (_history.length > 0) exclude.push(_history[_history.length-1]);
+    return randExcluding(exclude);
+  }
+  return (currentIndex + 1) % n;
+}
+
 function navigate(dir){
   _navQueue.push(function(){
     var n = TRACKS.length;
     var newIdx;
 
-    if (isShuffle){
-      if (dir > 0){
-        // ── ВПЕРЁД ──
-        // Берём первый из очереди рандомных треков
-        if (_shuffleQueue.length > 0){
-          newIdx = _shuffleQueue.shift();
-        } else {
-          do { newIdx=Math.floor(Math.random()*n); } while (n>1&&newIdx===currentIndex);
-        }
-        // Сохраняем текущий в историю (макс 10)
-        _history.push(currentIndex);
-        if (_history.length > 10) _history.shift();
-        // Пополняем очередь до 2
-        pickNextShuffle();
-
-        // nextCard уже должна показывать newIdx (из carouselReset)
-        // Убеждаемся что это так
+    if (dir > 0){
+      // ── ВПЕРЁД ──
+      if (_future.length > 0){
+        // Идём по future history
+        newIdx = _future.shift();
+        // Убеждаемся что nextCard показывает newIdx до анимации
         if (nextCard._idx !== newIdx){
           nextCard._idx = -1;
           fillSideCard(nextCard, newIdx);
           snapCard(nextCard, CAROUSEL_OFFSET, CAROUSEL_SCALE, CAROUSEL_DIM);
         }
-
       } else {
-        // ── НАЗАД ──
-        if (_history.length > 0){
-          newIdx = _history.pop();
-        } else {
-          newIdx = (currentIndex - 1 + n) % n;
-        }
-        // Пушим текущий обратно в очередь чтобы он был следующим вперёд
-        _shuffleQueue.unshift(currentIndex);
-        if (_shuffleQueue.length > 2) _shuffleQueue.length = 2;
-
-        // prevCard сейчас показывает _history[last] из предыдущего carouselReset
-        // Но нам нужно чтобы она показывала newIdx для анимации
-        // Обновляем только если нужно
-        if (prevCard._idx !== newIdx) {
-          prevCard._idx = -1;
-          fillSideCard(prevCard, newIdx);
-          snapCard(prevCard, -CAROUSEL_OFFSET, CAROUSEL_SCALE, CAROUSEL_DIM);
-        }
-
-        // Карточка за prevCard = _history[last] (ещё один назад)
-        var behindLeft = _history.length>0 ? _history[_history.length-1] : (newIdx-1+n)%n;
-        ghostCard._idx = -1;
-        fillSideCard(ghostCard, behindLeft);
-        ghostCard.style.transition = 'none';
-        ghostCard.style.opacity = '0';
-        ghostCard.style.transform = 'translateX(9999px)';
-        ghostCard.style.zIndex = '';
+        // Обычное движение вперёд
+        newIdx = consumeNext();
+        if (isShuffle) pickNextShuffle();
       }
+      // Пушим в историю ВСЕГДА — история = реальная последовательность прослушивания
+      _history.push(currentIndex);
+      if (_history.length > 10) _history.shift();
 
     } else {
-      newIdx = (currentIndex + dir + n) % n;
+      // ── НАЗАД ──
+      // Сохраняем текущий в future (макс 2)
+      _future.unshift(currentIndex);
+      if (_future.length > 2) _future.pop();
+
+      // Сбрасываем предвычисленную очередь шафла — после возврата вперёд нужен свежий рандом
+      _shuffleQueue = [];
+
+      // Берём из истории или по порядку
+      if (_history.length > 0){
+        newIdx = _history.pop();
+      } else {
+        newIdx = (currentIndex - 1 + n) % n;
+      }
+
+      // Обновляем prevCard до анимации
+      if (prevCard._idx !== newIdx){
+        prevCard._idx = -1;
+        fillSideCard(prevCard, newIdx);
+        snapCard(prevCard, -CAROUSEL_OFFSET, CAROUSEL_SCALE, CAROUSEL_DIM);
+      }
+
+      // ghostCard = предпредыдущий (то что будет слева от newIdx)
+      var behindLeft = _history.length>0 ? _history[_history.length-1] : (newIdx-1+n)%n;
+      ghostCard._idx = -1;
+      fillSideCard(ghostCard, behindLeft);
+      ghostCard.style.transition = 'none';
+      ghostCard.style.opacity = '0';
+      ghostCard.style.transform = 'translateX(9999px)';
+      ghostCard.style.zIndex = '';
     }
 
     prevBtn.style.pointerEvents = nextBtn.style.pointerEvents = 'none';
     carouselNavigate(dir, function(){
       loadTrack(newIdx);
       if (isPlaying) audio.play().then(function(){ setPlayUI(true); }).catch(function(){});
-    });
+    }, newIdx);
     setTimeout(function(){
       prevBtn.style.pointerEvents = nextBtn.style.pointerEvents = '';
       processNavQueue();
@@ -299,12 +336,15 @@ nextBtn.addEventListener('click',function(){ navigate(1); });
 
 audio.addEventListener('ended',function(){
   if (isRepeat){ audio.currentTime=0; audio.play().then(function(){ setPlayUI(true); }).catch(function(){}); return; }
-  var target;
-  if (isShuffle){ do{target=Math.floor(Math.random()*TRACKS.length);}while(TRACKS.length>1&&target===currentIndex); }
-  else { target=(currentIndex+1)%TRACKS.length; }
+  // Автопереход = движение вперёд, future сбрасывается
+  _future = [];
+  var target = consumeNext();
+  if (isShuffle) pickNextShuffle();
+  _history.push(currentIndex);
+  if (_history.length > 10) _history.shift();
   _navQueue.push(function(){
-    carouselNavigate(1,function(){ loadTrack(target); audio.play().then(function(){ setPlayUI(true); }).catch(function(){}); });
-    setTimeout(processNavQueue,CAROUSEL_DUR+30);
+    carouselNavigate(1, function(){ loadTrack(target); audio.play().then(function(){ setPlayUI(true); }).catch(function(){}); }, target);
+    setTimeout(processNavQueue, CAROUSEL_DUR+30);
   });
   if (!carouselBusy) processNavQueue();
 });
@@ -355,23 +395,49 @@ heartBtn.addEventListener('click',function(){
 });
 shuffleBtn.addEventListener('click',function(){
   isShuffle=!isShuffle;
+  _future = []; // при смене режима будущая история сбрасывается
   if(isShuffle){
     isRepeat=false;
-    // Предвычисляем следующий рандомный трек и анимируем правую карточку
     _shuffleQueue = []; _forwardAfterBack = -1;
     pickNextShuffle();
     animateNextCard(_shuffleQueue[0], null);
-    // Левую карточку тоже обновим тихо (без анимации) если история есть
     if(_history.length>0){
       prevCard._idx=-1;
       fillSideCard(prevCard,_history[_history.length-1]);
       snapCard(prevCard,-CAROUSEL_OFFSET,CAROUSEL_SCALE,CAROUSEL_DIM);
     }
   } else {
-    // Выключили шафл — сбрасываем на обычный порядок
+    // Выключили шафл — анимируем правую карточку: старая уезжает вверх, новая въезжает снизу
     _shuffleQueue=[]; _forwardAfterBack=-1;
-    invalidateSideCards();
-    carouselReset();
+    var newRightIdx = (currentIndex+1) % TRACKS.length;
+    var DUR = 350;
+
+    // Старая правая карточка уезжает вверх и исчезает
+    nextCard.style.transition='transform '+DUR+'ms cubic-bezier(0.4,0,0.2,1), opacity '+DUR+'ms ease';
+    nextCard.style.transform='translateX('+CAROUSEL_OFFSET+'px) scale('+CAROUSEL_SCALE+') translateY(-120px)';
+    nextCard.style.opacity='0';
+
+    // Новая карточка появляется снизу
+    ghostCard._idx=-1;
+    fillSideCard(ghostCard, newRightIdx);
+    ghostCard.style.transition='none';
+    ghostCard.style.zIndex='2';
+    ghostCard.style.opacity='0';
+    ghostCard.style.transform='translateX('+CAROUSEL_OFFSET+'px) scale('+CAROUSEL_SCALE+') translateY(120px)';
+    ghostCard.style.filter='brightness('+CAROUSEL_DIM+')';
+    ghostCard.offsetHeight;
+
+    setTimeout(function(){
+      ghostCard.style.transition='transform '+DUR+'ms cubic-bezier(0.4,0,0.2,1), opacity '+DUR+'ms ease';
+      ghostCard.style.opacity='1';
+      ghostCard.style.transform='translateX('+CAROUSEL_OFFSET+'px) scale('+CAROUSEL_SCALE+')';
+      setTimeout(function(){
+        nextCard._idx=-1;
+        fillSideCard(nextCard, newRightIdx);
+        snapCard(nextCard, CAROUSEL_OFFSET, CAROUSEL_SCALE, CAROUSEL_DIM);
+        ghostCard.style.transition='none'; ghostCard.style.opacity='0'; ghostCard.style.transform='translateX(9999px)'; ghostCard.style.zIndex='';
+      }, DUR+20);
+    }, DUR+20);
   }
   updateModeButtons();
 });
@@ -428,6 +494,18 @@ function fillSideCard(el, idx){
     : t.heartUnliked
       ? '<img style="width:'+(t.heartSize||36)+'px;height:'+(t.heartSize||36)+'px;object-fit:contain;display:block" src="'+esc(t.heartUnliked)+'">'
       : '<svg class="heart-svg" viewBox="0 0 24 24"><path d="'+heartPath+'" fill="none" stroke="'+t.heartColor+'" stroke-width="1.8" stroke-linejoin="round"/></svg>';
+
+  // Если эта карточка — та которая станет основной (idx совпадает с newIdx при навигации),
+  // рисуем шафл/повтор/громкость с реальным активным состоянием
+  var isIncoming = (el === (isShuffle
+    ? (nextCard)  // приблизительно — точнее определяем ниже
+    : nextCard) && false); // отключаем этот путь — используем флаг _isIncoming
+  var shuffleClr = el._isIncoming ? (isShuffle ? t.btnColor : t.modeColor) : t.modeColor;
+  var repeatClr  = el._isIncoming ? (isRepeat  ? t.btnColor : t.modeColor) : t.modeColor;
+  var vol = audio ? audio.volume : 1;
+  var wave1Display = el._isIncoming ? (vol > 0   ? '' : 'none') : '';
+  var wave2Display = el._isIncoming ? (vol > 0.5 ? '' : 'none') : '';
+
   el.style.background='none';
   el.innerHTML=
     '<div class="card-clip" style="background:'+t.cardColor+'"></div>'+
@@ -440,32 +518,22 @@ function fillSideCard(el, idx){
       '<div class="progress-thumb" style="left:0%"><svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.27 2 8.5 2 5.41 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.08C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.41 22 8.5c0 3.77-3.4 6.86-8.55 11.53L12 21.35z" style="fill:'+t.progressFill+'"/></svg></div>'+
     '</div><div class="time-row"><span class="time-label" style="color:'+t.timeColor+'">0:00</span><span class="time-label" style="color:'+t.timeColor+'">0:00</span></div></div>'+
     '<div class="controls-row"><div class="left-modes">'+
-      '<button class="mode-btn" style="pointer-events:none"><svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" style="stroke:'+modeClr+'"><path d="m18 14 4 4-4 4"/><path d="m18 2 4 4-4 4"/><path d="M2 18h1.973a4 4 0 0 0 3.3-1.7l5.454-8.6a4 4 0 0 1 3.3-1.7H22"/><path d="M2 6h1.972a4 4 0 0 1 3.6 2.2"/><path d="M22 18h-6.041a4 4 0 0 1-3.3-1.8l-.359-.45"/></svg></button>'+
-      '<button class="mode-btn" style="pointer-events:none"><svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" style="stroke:'+modeClr+'"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></button>'+
+      '<button class="mode-btn" style="pointer-events:none"><svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" style="stroke:'+shuffleClr+'"><path d="m18 14 4 4-4 4"/><path d="m18 2 4 4-4 4"/><path d="M2 18h1.973a4 4 0 0 0 3.3-1.7l5.454-8.6a4 4 0 0 1 3.3-1.7H22"/><path d="M2 6h1.972a4 4 0 0 1 3.6 2.2"/><path d="M22 18h-6.041a4 4 0 0 1-3.3-1.8l-.359-.45"/></svg></button>'+
+      '<button class="mode-btn" style="pointer-events:none"><svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" style="stroke:'+repeatClr+'"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></button>'+
     '</div>'+
     '<button class="ctrl-btn" style="pointer-events:none"><svg class="skip-svg" viewBox="0 0 24 24"><polygon points="19,20 9,12 19,4" style="'+skipPoly+'"/><line x1="5" y1="4" x2="5" y2="20" stroke-width="2" stroke-linecap="round" style="'+skipLine+'"/></svg></button>'+
     '<button class="ctrl-btn play-btn" style="background:'+t.btnColor+';pointer-events:none"><svg viewBox="0 0 24 24" width="22" height="22" style="fill:'+t.btnText+'"><polygon points="6,3 20,12 6,21"/></svg></button>'+
     '<button class="ctrl-btn" style="pointer-events:none"><svg class="skip-svg" viewBox="0 0 24 24"><polygon points="5,4 15,12 5,20" style="'+skipPoly+'"/><line x1="19" y1="4" x2="19" y2="20" stroke-width="2" stroke-linecap="round" style="'+skipLine+'"/></svg></button>'+
-    '<button class="volume-btn" style="pointer-events:none"><svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" style="width:26px;height:26px;stroke:'+skipClr+'"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M14.5 9a3.5 3.5 0 0 1 0 6"/><path d="M17.5 6.5a7 7 0 0 1 0 11"/></svg></button>'+
+    '<button class="volume-btn" style="pointer-events:none"><svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" style="width:26px;height:26px;stroke:'+skipClr+'"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>'+(wave1Display!=='none'?'<path d="M14.5 9a3.5 3.5 0 0 1 0 6"/>':'')+''+(wave2Display!=='none'?'<path d="M17.5 6.5a7 7 0 0 1 0 11"/>':'')+'</svg></button>'+
     '</div>'+
     '<div class="credits-row">'+
       '<div class="credit-item"><span class="credit-label" style="color:'+t.creditLabel+'">Art by</span><span class="credit-link" style="color:'+t.creditName+'">'+esc(t.artName||'')+'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></span></div>'+
       '<div class="credit-item right"><span class="credit-label" style="color:'+t.creditLabel+'">Music by</span><span class="credit-link" style="color:'+t.creditName+'">'+esc(t.musicName||'')+'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></span></div>'+
     '</div>';
+  el._isIncoming = false; // сбрасываем флаг после рендера
 }
 // Сбрасывает кэш индексов боковых карточек (нужно после liked/heart изменений)
 function invalidateSideCards(){ prevCard._idx=-1; nextCard._idx=-1; ghostCard._idx=-1; }
-
-function pickNextShuffle(){
-  var n=TRACKS.length;
-  while (_shuffleQueue.length < 2){
-    var last = _shuffleQueue.length>0 ? _shuffleQueue[_shuffleQueue.length-1]
-               : (currentIndex);
-    var idx;
-    do { idx=Math.floor(Math.random()*n); } while (n>1 && idx===last);
-    _shuffleQueue.push(idx);
-  }
-}
 
 // Анимация замены правой карточки: текущая уезжает вниз, новая падает сверху
 function animateNextCard(newIdx, onDone){
@@ -501,14 +569,15 @@ function carouselReset(){
   var n=TRACKS.length;
   var pi=(currentIndex-1+n)%n, ni=(currentIndex+1)%n;
 
-  var leftIdx, rightIdx;
-  if (isShuffle){
-    // Левая: последний в истории (тот что слушали до текущего)
-    leftIdx = _history.length>0 ? _history[_history.length-1] : pi;
-    // Правая: первый в очереди рандомных
+  // Левая — из истории если есть
+  var leftIdx = _history.length>0 ? _history[_history.length-1] : pi;
+  // Правая — из _future если есть, иначе шафл-очередь или следующий по порядку
+  var rightIdx;
+  if (_future.length > 0){
+    rightIdx = _future[0];
+  } else if (isShuffle){
     rightIdx = _shuffleQueue.length>0 ? _shuffleQueue[0] : ni;
   } else {
-    leftIdx = pi;
     rightIdx = ni;
   }
 
@@ -524,9 +593,10 @@ function carouselReset(){
 }
 
 
-function carouselNavigate(dir, onSwap){
+function carouselNavigate(dir, onSwap, targetIdx){
   if (carouselBusy) return; carouselBusy=true;
-  var n=TRACKS.length, newIdx=(currentIndex+dir+n)%n;
+  var n=TRACKS.length;
+  var newIdx = (targetIdx !== undefined) ? targetIdx : (currentIndex+dir+n)%n;
   var staying=dir>0?nextCard:prevCard, leaving=dir>0?prevCard:nextCard;
 
   preloadImages(newIdx);
@@ -543,22 +613,22 @@ function carouselNavigate(dir, onSwap){
   }
 
   var newSideIdx;
-  if (isShuffle){
-    if (dir > 0){
+  if (dir > 0){
+    // ghostCard въезжает на правую позицию — это следующий после newIdx
+    // то есть _future[0] если есть, иначе шафл/порядок
+    if (_future.length > 0){
+      newSideIdx = _future[0];
+    } else if (isShuffle){
       newSideIdx = _shuffleQueue.length>0 ? _shuffleQueue[0] : (currentIndex+2)%n;
-      ghostCard._idx=-1;
-      fillSideCard(ghostCard,newSideIdx);
     } else {
-      // navigate уже заполнил ghostCard правильным треком из истории — не трогаем
-      // просто используем тот же индекс
-      newSideIdx = ghostCard._idx >= 0 ? ghostCard._idx
-        : (_history.length>0 ? _history[_history.length-1] : (currentIndex-2+n)%n);
-      // ghostCard уже заполнен — просто сброс позиции
+      newSideIdx = (currentIndex+2)%n;
     }
-  } else {
-    newSideIdx = dir>0 ? (currentIndex+2)%n : (currentIndex-2+n)%n;
     ghostCard._idx=-1;
-    fillSideCard(ghostCard,newSideIdx);
+    fillSideCard(ghostCard, newSideIdx);
+  } else {
+    // Назад — ghostCard уже заполнен в navigate() правильным behindLeft из истории
+    newSideIdx = ghostCard._idx >= 0 ? ghostCard._idx
+      : (_history.length>0 ? _history[_history.length-1] : (currentIndex-2+n)%n);
   }
   ghostCard.style.zIndex='1'; ghostCard.style.opacity='0'; ghostCard.style.transition='none';
   ghostCard.offsetHeight;
@@ -566,8 +636,18 @@ function carouselNavigate(dir, onSwap){
   ghostCard.style.filter='brightness('+CAROUSEL_DIM+')';
   ghostCard.offsetHeight;
 
-  var newT=TRACKS[newIdx];
-  // Запомним newIdx в closure для использования в setTimeout
+  // Перерисовываем staying с правильным состоянием кнопок (шафл/повтор/громкость)
+  staying._isIncoming = true;
+  staying._idx = -1;
+  fillSideCard(staying, newIdx);
+
+  // playerCard тоже уезжает — сбрасываем его кнопки на базовые цвета до анимации
+  var curT = TRACKS[currentIndex];
+  shuffleSvg.style.stroke = curT.modeColor;
+  repeatSvg.style.stroke  = curT.modeColor;
+  volWave1.style.display = '';
+  volWave2.style.display = '';
+
   var _animNewIdx = newIdx;
 
   prevCard.style.transition=playerCard.style.transition=nextCard.style.transition=ghostCard.style.transition=CAROUSEL_ANIM;
@@ -589,29 +669,19 @@ function carouselNavigate(dir, onSwap){
     ghostCard.style.opacity='0'; ghostCard.style.transform='translateX(9999px)'; ghostCard.style.zIndex='';
     staying.style.zIndex=leaving.style.zIndex=''; leaving.style.opacity='';
 
-    // Сбрасываем кэш оставляемой карточки чтобы carouselReset её обновил
     if (dir > 0) prevCard._idx=-1; else nextCard._idx=-1;
-
-    // Скрываем staying ДО carouselReset чтобы перерисовка не мелькала
     staying.style.visibility='hidden';
 
-    // Обновляем stroke кнопок шафл/повтор ДО onSwap с правильными цветами
-    var preT = TRACKS[_animNewIdx];
-    shuffleSvg.style.stroke = isShuffle ? preT.btnColor : preT.modeColor;
-    repeatSvg.style.stroke  = isRepeat  ? preT.btnColor : preT.modeColor;
+    // Обновляем интерактивные кнопки ДО carouselReset — чтобы когда карточки встанут на место, всё уже было правильно
+    updateModeButtons(TRACKS[currentIndex]);
+    updateVolIcon();
 
     carouselReset();
 
-    var nT=TRACKS[currentIndex];
     playerCard.style.zIndex=''; prevCard.offsetHeight; staying.style.visibility='';
 
-    // Обновляем подсветку в меню если оно открыто
     if (menuOpen) renderAllTracks();
-
-    // В шафле — предвычисляем следующий трек ПОСЛЕ обновления currentIndex
-    if (isShuffle){
-      pickNextShuffle();    // вычисляем относительно нового currentIndex
-    }
+    if (isShuffle) pickNextShuffle();
 
     carouselBusy=false;
   },CAROUSEL_DUR);
@@ -647,7 +717,7 @@ const panelAll     = document.getElementById('panelAllTracks');
 const panelSearch  = document.getElementById('panelSearch');
 const panelCredits = document.getElementById('panelCredits');
 
-function toggleMenu(){ menuOpen=!menuOpen; document.body.classList.toggle('menu-open',menuOpen); if(menuOpen){renderAllTracks();showTrackList();} }
+function toggleMenu(){ menuOpen=!menuOpen; document.body.classList.toggle('menu-open',menuOpen); if(menuOpen){renderAllTracks();showTrackList();} setTimeout(function(){ if(window._scrollbarUpdate) window._scrollbarUpdate(); },50); }
 menuBtn.addEventListener('click',toggleMenu);
 
 function showTrackList(){
@@ -702,9 +772,63 @@ function makeTrackItem(i, container){
   );
 
   item.addEventListener('click', function(){
-    loadTrack(i); invalidateSideCards(); carouselReset();
-    audio.play().then(function(){ setPlayUI(true); }).catch(function(){});
-    renderAllTracks();
+    if (i === currentIndex) return;
+
+    // Если выбранный трек — соседняя карточка, просто листаем
+    if (i === nextCard._idx){ navigate(1); renderAllTracks(); return; }
+    if (i === prevCard._idx){ navigate(-1); renderAllTracks(); return; }
+
+    // Стираем всю историю — новый выбор начинает с чистого листа
+    _history = []; _future = []; _shuffleQueue = [];
+    if (isShuffle) pickNextShuffle();
+
+    var DUR = 320;
+
+    // Снимаем текущие transform у боковых (они уже стоят на месте через snapCard)
+    // и добавляем только вертикальный сдвиг — уезжают вниз
+    var prevT = 'translateX('+(-CAROUSEL_OFFSET)+'px) scale('+CAROUSEL_SCALE+') translateY(120px)';
+    var nextT = 'translateX('+(CAROUSEL_OFFSET)+'px) scale('+CAROUSEL_SCALE+') translateY(120px)';
+    var mainT = 'translateY(120px)';
+
+    prevCard.style.transition = playerCard.style.transition = nextCard.style.transition =
+      'transform '+DUR+'ms cubic-bezier(0.4,0,0.2,1), opacity '+DUR+'ms ease';
+    prevCard.style.transform = prevT;
+    playerCard.style.transform = mainT;
+    nextCard.style.transform = nextT;
+    prevCard.style.opacity = playerCard.style.opacity = nextCard.style.opacity = '0';
+
+    setTimeout(function(){
+      // Загружаем новый трек пока карточки невидимы
+      prevCard.style.transition = playerCard.style.transition = nextCard.style.transition = 'none';
+      loadTrack(i);
+      invalidateSideCards();
+      carouselReset();
+
+      // Телепортируем наверх
+      prevCard.style.transform = 'translateX('+(-CAROUSEL_OFFSET)+'px) scale('+CAROUSEL_SCALE+') translateY(-80px)';
+      playerCard.style.transform = 'translateY(-80px)';
+      nextCard.style.transform = 'translateX('+(CAROUSEL_OFFSET)+'px) scale('+CAROUSEL_SCALE+') translateY(-80px)';
+      prevCard.style.opacity = playerCard.style.opacity = nextCard.style.opacity = '0';
+
+      playerCard.offsetHeight;
+
+      // Въезжают сверху на свои места
+      prevCard.style.transition = playerCard.style.transition = nextCard.style.transition =
+        'transform '+DUR+'ms cubic-bezier(0.16,1,0.3,1), opacity '+DUR+'ms ease';
+      prevCard.style.transform = 'translateX('+(-CAROUSEL_OFFSET)+'px) scale('+CAROUSEL_SCALE+')';
+      playerCard.style.transform = 'translateX(0px) scale(1)';
+      nextCard.style.transform = 'translateX('+(CAROUSEL_OFFSET)+'px) scale('+CAROUSEL_SCALE+')';
+      prevCard.style.opacity = playerCard.style.opacity = nextCard.style.opacity = '1';
+
+      setTimeout(function(){
+        prevCard.style.transition = playerCard.style.transition = nextCard.style.transition = '';
+        updateModeButtons(TRACKS[currentIndex]);
+        updateVolIcon();
+      }, DUR + 20);
+
+      audio.play().then(function(){ setPlayUI(true); }).catch(function(){});
+      renderAllTracks();
+    }, DUR);
   });
 
   // Лайк прямо в меню
@@ -750,3 +874,90 @@ heartBtn.addEventListener('click',function(){
   if (menuOpen) renderAllTracks();
   setTimeout(carouselReset,50);
 });
+// ── Кастомный скроллбар меню ──────────────────────────────────────────────────
+(function(){
+  var panels = [panelAll, panelSearch];
+
+  // Один ползунок внутри side-menu (position:absolute)
+  var thumb = document.createElement('div');
+  thumb.className = 'custom-scrollbar-thumb';
+  sideMenu.appendChild(thumb);
+
+  var hideT = null;
+  var isDraggingThumb = false;
+  var dragStartY = 0, dragStartScroll = 0;
+
+  function getActivePanel(){
+    for (var i=0; i<panels.length; i++){
+      if (panels[i].classList.contains('visible')) return panels[i];
+    }
+    return null;
+  }
+
+  function updateThumb(){
+    var panel = getActivePanel();
+    if (!panel){ thumb.style.display='none'; return; }
+
+    var scrollH = panel.scrollHeight, clientH = panel.clientHeight;
+    if (scrollH <= clientH){ thumb.style.display='none'; return; }
+
+    // Позиция панели относительно меню
+    var menuRect = sideMenu.getBoundingClientRect();
+    var panelRect = panel.getBoundingClientRect();
+    var panelTop = panelRect.top - menuRect.top;
+
+    var ratio = clientH / scrollH;
+    var thumbH = Math.max(28, clientH * ratio);
+    var maxScroll = scrollH - clientH;
+    var maxTop = clientH - thumbH;
+    var top = panelTop + (panel.scrollTop / maxScroll) * maxTop;
+
+    thumb.style.display = 'block';
+    thumb.style.height = thumbH + 'px';
+    thumb.style.top = top + 'px';
+  }
+
+  panels.forEach(function(panel){
+    panel.addEventListener('scroll', function(){
+      updateThumb();
+      if (isDraggingThumb) return;
+      thumb.classList.add('active');
+      clearTimeout(hideT);
+      hideT = setTimeout(function(){ thumb.classList.remove('active'); }, 800);
+    }, { passive: true });
+
+    var ro = new ResizeObserver(updateThumb);
+    ro.observe(panel);
+  });
+
+  // Drag ползунка
+  thumb.addEventListener('mousedown', function(e){
+    e.preventDefault();
+    var panel = getActivePanel(); if (!panel) return;
+    isDraggingThumb = true;
+    dragStartY = e.clientY;
+    dragStartScroll = panel.scrollTop;
+    thumb.classList.add('active');
+    document.addEventListener('mousemove', onDrag);
+    document.addEventListener('mouseup', onUp);
+  });
+  function onDrag(e){
+    var panel = getActivePanel(); if (!panel) return;
+    var clientH = panel.clientHeight;
+    var thumbH = parseFloat(thumb.style.height) || 28;
+    var maxTop = clientH - thumbH;
+    var maxScroll = panel.scrollHeight - clientH;
+    panel.scrollTop = Math.max(0, Math.min(maxScroll, dragStartScroll + (e.clientY - dragStartY) * (maxScroll / maxTop)));
+    updateThumb();
+  }
+  function onUp(){
+    isDraggingThumb = false;
+    hideT = setTimeout(function(){ thumb.classList.remove('active'); }, 800);
+    document.removeEventListener('mousemove', onDrag);
+    document.removeEventListener('mouseup', onUp);
+  }
+
+  // Обновляем когда меню открывается
+  window._scrollbarUpdate = updateThumb;
+  updateThumb();
+})();
